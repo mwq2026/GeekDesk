@@ -111,6 +111,24 @@ namespace GeekDesk.Util
         public static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
 
         [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
+
+        private static readonly IntPtr HWND_TOP = IntPtr.Zero;
+        private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+        private const int SW_SHOW = 5;
+        private const int SW_RESTORE = 9;
+
+        [DllImport("user32.dll")]
         public static extern bool GetWindowRect(IntPtr hWnd, ref LPRECT rect);
 
         // Import GetDC and ReleaseDC functions from user32.dll
@@ -267,12 +285,197 @@ namespace GeekDesk.Util
         /// <returns></returns>
         public static bool WindowIsTop(Window window)
         {
+            // 旧实现把“前台窗口标题为空”也当成主窗口在最前。
+            // Win11 任务栏 / 托盘溢出层经常没有标题，点击托盘后会被误判，
+            // 进而把“显示面板”当成“隐藏面板”。
+            return WindowIsForeground(window);
+        }
+
+        public static bool WindowIsForeground(Window window)
+        {
+            if (window == null) return false;
             IntPtr handle = new WindowInteropHelper(window).Handle;
-            IntPtr deskHandle = GetDesktopHandle(window, DesktopLayer.Progman);
-            IntPtr topHandle = GetForegroundWindow();
-            //暂时不能正确获取桌面handle  但发现焦点在桌面时 window title为空
-            string windowTitle = GetWindowTitle(topHandle);
-            return topHandle.Equals(handle) || topHandle.Equals(deskHandle) || string.IsNullOrEmpty(windowTitle);
+            if (handle == IntPtr.Zero) return false;
+            return GetForegroundWindow() == handle;
+        }
+
+        public static bool IsWindows11OrLater()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    if (key == null) return false;
+                    string buildText = key.GetValue("CurrentBuildNumber") as string;
+                    if (int.TryParse(buildText, out int build))
+                    {
+                        return build >= 22000;
+                    }
+                }
+            }
+            catch (Exception) { }
+            return false;
+        }
+
+        public static bool IsDesktopOrShellHandle(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero) return false;
+            var className = new StringBuilder(256);
+            GetClassName(handle, className, className.Capacity);
+            string cls = className.ToString();
+            return cls == "Progman" || cls == "WorkerW" || cls == "SHELLDLL_DefView";
+        }
+
+        public static bool IsDesktopForeground()
+        {
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero) return false;
+            if (IsIgnoredShellWindow(foreground)) return false;
+
+            IntPtr current = foreground;
+            for (int i = 0; i < 6 && current != IntPtr.Zero; i++)
+            {
+                if (IsDesktopOrShellHandle(current)) return true;
+                current = GetParent(current);
+            }
+
+            var className = new StringBuilder(256);
+            GetClassName(foreground, className, className.Capacity);
+            string cls = className.ToString();
+            if (cls == "XamlExplorerHostIslandWindow" || cls == "Windows.UI.Composition.DesktopWindowContentBridge")
+            {
+                int pid;
+                GetWindowThreadProcessId(foreground, out pid);
+                try
+                {
+                    if (string.Equals(Process.GetProcessById(pid).ProcessName, "explorer", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception) { }
+            }
+            return false;
+        }
+
+        private static bool IsIgnoredShellWindow(IntPtr handle)
+        {
+            var className = new StringBuilder(256);
+            GetClassName(handle, className, className.Capacity);
+            string cls = className.ToString();
+            return cls == "Shell_TrayWnd"
+                || cls == "Shell_SecondaryTrayWnd"
+                || cls == "NotifyIconOverflowWindow"
+                || cls == "TopLevelWindowForOverflowXamlIsland"
+                || cls == "CabinetWClass"
+                || cls == "ExploreWClass";
+        }
+
+        private static bool keepAboveDesktopBusy = false;
+
+        /// <summary>
+        /// 桌面（WorkerW / Progman）被点到前台时，把可见面板提到桌面之上，但不置顶、不抢激活。
+        /// 用来替代 Owner=Progman，避免 Win11 下托盘点击无法前置。
+        /// </summary>
+        public static void KeepAboveDesktopIfNeeded(Window window)
+        {
+            if (keepAboveDesktopBusy) return;
+            if (window == null) return;
+            if (window.Visibility != Visibility.Visible) return;
+            if (window.Topmost == true) return;
+            IntPtr hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd == IntPtr.Zero) return;
+            if (!IsDesktopForeground()) return;
+
+            keepAboveDesktopBusy = true;
+            try
+            {
+                SetWindowPos(new HandleRef(window, hwnd), new HandleRef(null, HWND_TOP), 0, 0, 0, 0,
+                    (int)(SetWindowPosFlags.SWP_NOMOVE | SetWindowPosFlags.SWP_NOSIZE | SetWindowPosFlags.SWP_NOACTIVATE));
+            }
+            finally
+            {
+                keepAboveDesktopBusy = false;
+            }
+        }
+
+        /// <summary>
+        /// Win11 下 Owner 设为桌面窗口会导致 Activate / Show 无法把面板提到前台。
+        /// </summary>
+        public static void ClearDesktopOwner(Window window)
+        {
+            if (window == null) return;
+            WindowInteropHelper helper = new WindowInteropHelper(window);
+            if (IsDesktopOrShellHandle(helper.Owner))
+            {
+                helper.Owner = IntPtr.Zero;
+            }
+        }
+
+        /// <summary>
+        /// 可靠地显示并激活无任务栏按钮的主面板（应对 Win11 前台限制）。
+        /// </summary>
+        public static void BringToFront(Window window)
+        {
+            if (window == null) return;
+            ClearDesktopOwner(window);
+
+            if (window.WindowState == WindowState.Minimized)
+            {
+                window.WindowState = WindowState.Normal;
+            }
+
+            window.Show();
+            if (window.Visibility != Visibility.Visible)
+            {
+                window.Visibility = Visibility.Visible;
+            }
+
+            WindowInteropHelper helper = new WindowInteropHelper(window);
+            IntPtr hwnd = helper.EnsureHandle();
+            ShowWindow(hwnd, SW_SHOW);
+
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground != hwnd)
+            {
+                int foregroundPid;
+                uint thisTid = GetCurrentThreadId();
+                uint foregroundTid = (uint)GetWindowThreadProcessId(foreground, out foregroundPid);
+                bool attached = false;
+                if (foreground != IntPtr.Zero && foregroundTid != 0 && foregroundTid != thisTid)
+                {
+                    attached = AttachThreadInput(thisTid, foregroundTid, true);
+                }
+                try
+                {
+                    SwitchToThisWindow(hwnd, true);
+                    SetForegroundWindow(hwnd);
+                }
+                finally
+                {
+                    if (attached)
+                    {
+                        AttachThreadInput(thisTid, foregroundTid, false);
+                    }
+                }
+            }
+            else
+            {
+                SwitchToThisWindow(hwnd, true);
+                SetForegroundWindow(hwnd);
+            }
+
+            HandleRef hwndRef = new HandleRef(window, hwnd);
+            SetWindowPos(hwndRef, new HandleRef(null, HWND_TOPMOST), 0, 0, 0, 0,
+                (int)(SetWindowPosFlags.SWP_NOMOVE | SetWindowPosFlags.SWP_NOSIZE | SetWindowPosFlags.SWP_SHOWWINDOW));
+            if (window.Topmost != true)
+            {
+                SetWindowPos(hwndRef, new HandleRef(null, HWND_NOTOPMOST), 0, 0, 0, 0,
+                    (int)(SetWindowPosFlags.SWP_NOMOVE | SetWindowPosFlags.SWP_NOSIZE | SetWindowPosFlags.SWP_SHOWWINDOW));
+            }
+
+            window.Activate();
+            window.Focus();
         }
 
         private static string GetWindowTitle(IntPtr handle)

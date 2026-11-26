@@ -59,7 +59,8 @@ namespace GeekDesk.MyThread
             {
                 App.Current.Dispatcher.Invoke(DispatcherPriority.Normal, new Action(() =>
                 {
-                    if (MainWindow.mainWindow.Visibility == Visibility.Collapsed || MainWindow.mainWindow.Opacity == 0)
+                    // 与热键一致：被挡住时提到前面，已在最前则隐藏
+                    if (MainWindow.CheckShouldShowAppFromHook())
                     {
                         MainWindow.ShowApp();
                     }

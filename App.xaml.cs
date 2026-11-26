@@ -24,11 +24,23 @@ namespace GeekDesk
         public App()
         {
             this.Startup += new StartupEventHandler(App_Startup);
+            this.Exit += App_Exit;
             Application.Current.DispatcherUnhandledException += Current_DispatcherUnhandledException;
             AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
             SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            SystemEvents.SessionEnding += OnSessionEnding;
         }
 
+
+        private void App_Exit(object sender, ExitEventArgs e)
+        {
+            CommonCode.ShutdownSave();
+        }
+
+        private void OnSessionEnding(object sender, SessionEndingEventArgs e)
+        {
+            CommonCode.FlushSaveAppData();
+        }
 
         private void App_Startup(object sender, StartupEventArgs e)
         {
@@ -63,6 +75,7 @@ namespace GeekDesk
                 case PowerModes.Suspend:
                     // 系统进入休眠状态
                     LogUtil.WriteLog("System is going to sleep.");
+                    CommonCode.FlushSaveAppData();
                     break;
             }
         }

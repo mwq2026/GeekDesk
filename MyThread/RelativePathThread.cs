@@ -19,6 +19,7 @@ namespace GeekDesk.MyThread
                     ObservableCollection<MenuInfo> menuList = MainWindow.appData.MenuList;
 
                     string myExePath = Constants.APP_DIR + "GeekDesk.exe";
+                    bool changed = false;
                     foreach (MenuInfo mi in menuList)
                     {
                         ObservableCollection<IconInfo> iconList = mi.IconList;
@@ -29,13 +30,18 @@ namespace GeekDesk.MyThread
                             string relativePath = FileUtil.MakeRelativePath(myExePath, icon.Path);
                             if (File.Exists(icon.Path)
                                 && !string.IsNullOrEmpty(relativePath)
-                                && !relativePath.Equals(icon.Path))
+                                && !relativePath.Equals(icon.Path)
+                                && !relativePath.Equals(icon.RelativePath))
                             {
                                 icon.RelativePath_NoWrite = relativePath;
+                                changed = true;
                             }
                         }
                     }
-                    CommonCode.SaveAppData(MainWindow.appData, Constants.DATA_FILE_PATH);
+                    if (changed)
+                    {
+                        CommonCode.SaveAppData(MainWindow.appData, Constants.DATA_FILE_PATH);
+                    }
                     //CommonCode.SaveAppData(MainWindow.appData, Constants.DATA_FILE_BAK_PATH);
                 }
                 catch (Exception ex)

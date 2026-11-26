@@ -50,7 +50,13 @@ namespace GeekDesk
         public static int colorPickerHotKeyId = -1;
         public static MainWindow mainWindow;
 
-       
+        /// <summary>
+        /// 托盘点击会先抢走焦点并触发 Deactivated。在短时间窗口内忽略“失焦隐藏”，
+        /// 避免刚刚 ShowApp 又被立刻 HideApp。
+        /// </summary>
+        private static DateTime suppressLostFocusHideUntil = DateTime.MinValue;
+        private static DateTime deactivatedAt = DateTime.MinValue;
+        private const int TrayClickGraceMs = 600;
 
         private static bool dataFileExist = true;
         public MainWindow()
@@ -344,48 +350,11 @@ namespace GeekDesk
                 RegisterColorPickerHotKey(true);
             }
 
-            //注册自启动
-            if (!appData.AppConfig.SelfStartUped && !Constants.DEV)
-            {
-                RegisterUtil.SetSelfStarting(appData.AppConfig.SelfStartUp, Constants.MY_NAME);
-            }
-
-            //注册鼠标监听事件
-            if (appData.AppConfig.MouseMiddleShow)
-            {
-                MouseHookThread.Hook();
-            }
-
-            //显秒插件
-            if (appData.AppConfig.SecondsWindow == true)
-            {
-                SecondsWindow.ShowWindow();
-            }
-
-            //监听实时文件夹菜单
-            FileWatcher.EnableLinkMenuWatcher(appData);
-
-
-            //更新任务开启  检测更新
-            UpdateTask.Start();
-
-            //建立相对路径
-            RelativePathThread.MakeRelativePath();
-
             //毛玻璃  暂时未解决阴影问题
             //BlurGlassUtil.EnableBlur(this);
 
-            //设置归属桌面  解决桌面覆盖程序界面的bug
-            WindowUtil.SetOwner(this, WindowUtil.GetDesktopHandle(this, DesktopLayer.Progman));
-
-            if (appData.AppConfig.EnableEveryThing == true)
-            {
-                //开启EveryThing插件
-                EveryThingUtil.EnableEveryThing();
-            }
-
-            //启动文件备份任务
-            BakTask.Start();
+            // 不再把 Owner 设为 Progman：Win11 下会导致托盘点击后无法激活。
+            // 桌面盖住面板的问题改由 KeepAboveDesktopIfNeeded 在桌面成为前台时处理。
 
             Keyboard.Focus(SearchBox);
 
@@ -396,7 +365,77 @@ namespace GeekDesk
             {
                 Guide();
             }
-           
+
+            // 插件、钩子、备份和更新不阻塞首帧
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(StartDeferredServices));
+        }
+
+        private void StartDeferredServices()
+        {
+            // 各项独立捕获，避免一个失败导致钩子、备份等全部跳过
+            TryStartDeferred("注册自启动", () =>
+            {
+                if (!appData.AppConfig.SelfStartUped && !Constants.DEV)
+                {
+                    RegisterUtil.SetSelfStarting(appData.AppConfig.SelfStartUp, Constants.MY_NAME);
+                }
+            });
+
+            TryStartDeferred("鼠标监听", () =>
+            {
+                if (appData.AppConfig.MouseMiddleShow)
+                {
+                    MouseHookThread.Hook();
+                }
+            });
+
+            TryStartDeferred("显秒插件", () =>
+            {
+                if (appData.AppConfig.SecondsWindow == true)
+                {
+                    SecondsWindow.ShowWindow();
+                }
+            });
+
+            TryStartDeferred("文件夹菜单监听", () =>
+            {
+                FileWatcher.EnableLinkMenuWatcher(appData);
+            });
+
+            TryStartDeferred("更新检测", () =>
+            {
+                UpdateTask.Start();
+            });
+
+            TryStartDeferred("相对路径", () =>
+            {
+                RelativePathThread.MakeRelativePath();
+            });
+
+            TryStartDeferred("EveryThing插件", () =>
+            {
+                if (appData.AppConfig.EnableEveryThing == true)
+                {
+                    EveryThingUtil.EnableEveryThing();
+                }
+            });
+
+            TryStartDeferred("文件备份任务", () =>
+            {
+                BakTask.Start();
+            });
+        }
+
+        private static void TryStartDeferred(string name, Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                LogUtil.WriteErrorLog(ex, "延迟启动任务失败: " + name);
+            }
         }
 
 
@@ -591,6 +630,11 @@ namespace GeekDesk
             //    return;
             //}
 
+            if (mainWindow == null) return;
+
+            // 先挡住随后到来的 Deactivated，否则托盘点击会把刚打开的面板立刻关掉
+            SuppressLostFocusHide();
+
             if (MarginHide.ON_HIDE)
             {
                 //修改贴边隐藏状态为未隐藏
@@ -608,9 +652,7 @@ namespace GeekDesk
                 //ShowWindowFollowMouse.FollowMouse(mainWindow);
             }
 
-
-            MainWindow.mainWindow.Activate();
-            mainWindow.Show();
+            WindowUtil.BringToFront(mainWindow);
             //mainWindow.Visibility = Visibility.Visible;
             if (appData.AppConfig.AppAnimation)
             {
@@ -638,6 +680,11 @@ namespace GeekDesk
             {
                 Keyboard.Focus(mainWindow.SearchBox);
             }
+        }
+
+        public static void SuppressLostFocusHide(int milliseconds = TrayClickGraceMs)
+        {
+            suppressLostFocusHideUntil = DateTime.UtcNow.AddMilliseconds(milliseconds);
         }
 
         public static void HideApp()
@@ -727,22 +774,56 @@ namespace GeekDesk
         /// <param name="e"></param>
         private void NotifyIcon_Click(object sender, RoutedEventArgs e)
         {
-            if (CheckShouldShowApp())
+            bool justLostFocus = (DateTime.UtcNow - deactivatedAt).TotalMilliseconds >= 0
+                && (DateTime.UtcNow - deactivatedAt).TotalMilliseconds <= TrayClickGraceMs;
+
+            // 面板未真正展开（已隐藏、贴边隐藏、正在淡出）时一律显示
+            if (!IsPanelOpen())
             {
                 ShowApp();
+                return;
             }
-            else
+
+            // 失焦隐藏：这次托盘点击已经让面板失去焦点，HideApp 可能已经开始。
+            // 若再按“切换”走隐藏，用户会觉得“点了托盘没弹出来”。
+            if (justLostFocus && appData.AppConfig.AppHideType == AppHideType.LOST_FOCUS)
             {
-                HideApp();
+                ShowApp();
+                return;
             }
+
+            // 面板可见但之前就被其它窗口挡住：提到前面，而不是关掉
+            if (!justLostFocus && !WindowUtil.WindowIsForeground(mainWindow))
+            {
+                ShowApp();
+                return;
+            }
+
+            HideApp();
+        }
+
+        private static bool IsPanelOpen()
+        {
+            if (mainWindow == null) return false;
+            if (mainWindow.Visibility != Visibility.Visible) return false;
+            if (mainWindow.Opacity <= 0) return false;
+            if (MarginHide.IS_HIDE) return false;
+            // 动画关闭过程中窗口仍是 Visible，但已经在淡出
+            if (appData.AppConfig.AppAnimation && appData.AppConfig.IsShow == false)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        public static bool CheckShouldShowAppFromHook()
+        {
+            return CheckShouldShowApp();
         }
 
         private static bool CheckShouldShowApp()
         {
-            return mainWindow.Visibility == Visibility.Collapsed
-                || mainWindow.Opacity == 0
-                || MarginHide.IS_HIDE
-                || !WindowUtil.WindowIsTop(mainWindow);
+            return !IsPanelOpen() || !WindowUtil.WindowIsForeground(mainWindow);
         }
 
         /// <summary>
@@ -813,6 +894,10 @@ namespace GeekDesk
 
         private void AppWindowLostFocus()
         {
+            if (DateTime.UtcNow < suppressLostFocusHideUntil)
+            {
+                return;
+            }
             if (appData.AppConfig.AppHideType == AppHideType.LOST_FOCUS
                 && this.Opacity == 1 && !RunTimeStatus.LOCK_APP_PANEL)
             {
@@ -856,6 +941,7 @@ namespace GeekDesk
             {
                 EveryThingUtil.DisableEveryThing();
             }
+            CommonCode.FlushSaveAppData();
             Application.Current.Shutdown();
         }
         /// <summary>
@@ -970,7 +1056,16 @@ namespace GeekDesk
 
         private void AppWindow_Deactivated(object sender, EventArgs e)
         {
+            deactivatedAt = DateTime.UtcNow;
             AppWindowLostFocus();
+            // 等前台窗口切换完成后再判断是否被桌面盖住
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(() =>
+            {
+                if (IsPanelOpen())
+                {
+                    WindowUtil.KeepAboveDesktopIfNeeded(this);
+                }
+            }));
         }
 
         /// <summary>
@@ -1033,6 +1128,8 @@ namespace GeekDesk
             }
         }
 
+        private const int WM_WINDOWPOSCHANGED = 0x0047;
+
         IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
             if (msg == MessageUtil.WM_COPYDATA)
@@ -1041,9 +1138,15 @@ namespace GeekDesk
                 if ("ShowApp".Equals(cds.msg))
                 {
                     ShowApp();
+                    handled = true;
                 }
             }
-            return hwnd;
+            else if (msg == WM_WINDOWPOSCHANGED)
+            {
+                // 其它窗口（尤其是桌面 WorkerW）调整 Z 序后，防止可见面板被桌面盖住
+                WindowUtil.KeepAboveDesktopIfNeeded(this);
+            }
+            return IntPtr.Zero;
         }
 
         #region 新手引导

@@ -1077,7 +1077,8 @@ namespace GeekDesk.ViewModel
         private void OnPropertyChanged(string propertyName)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-            if (propertyName != null && !propertyName.Contains("NoWrite"))
+            // IsShow 只用于窗口动画，写入配置文件没有意义，还会在每次显示/隐藏时卡住界面
+            if (propertyName != null && !propertyName.Contains("NoWrite") && propertyName != "IsShow")
             {
                 CommonCode.SaveAppData(MainWindow.appData, Constants.DATA_FILE_PATH);
             }

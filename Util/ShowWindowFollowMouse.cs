@@ -5,6 +5,8 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Forms;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
 using static GeekDesk.Util.ShowWindowFollowMouse;
 
 namespace GeekDesk.Util
@@ -81,6 +83,42 @@ namespace GeekDesk.Util
             return dpi / 96f;
         }
 
+        /// <summary>
+        /// 设备像素到 WPF DIP 的系数（physical * scale = DIP）。
+        /// </summary>
+        private static void GetDipScale(Window window, out double scaleX, out double scaleY)
+        {
+            scaleX = 0;
+            scaleY = 0;
+            try
+            {
+                PresentationSource source = window != null ? PresentationSource.FromVisual(window) : null;
+                if (source == null && window != null)
+                {
+                    IntPtr hwnd = new WindowInteropHelper(window).Handle;
+                    if (hwnd != IntPtr.Zero)
+                    {
+                        source = HwndSource.FromHwnd(hwnd);
+                    }
+                }
+                if (source != null && source.CompositionTarget != null)
+                {
+                    Matrix matrix = source.CompositionTarget.TransformFromDevice;
+                    scaleX = matrix.M11;
+                    scaleY = matrix.M22;
+                }
+            }
+            catch (Exception) { }
+
+            if (scaleX <= 0 || scaleY <= 0)
+            {
+                float dpiX = GetDpi(true);
+                float dpiY = GetDpi(false);
+                scaleX = dpiX > 0 ? 1.0 / dpiX : 1.0;
+                scaleY = dpiY > 0 ? 1.0 / dpiY : 1.0;
+            }
+        }
+
         private static IntPtr GetScreenHandleFromMouse()
         {
             // Get the mouse position
@@ -108,58 +146,51 @@ namespace GeekDesk.Util
         /// </summary>
         public static void Show(Window window, MousePosition position, double widthOffset = 0, double heightOffset = 0)
         {
-            //获取鼠标位置
-            System.Drawing.Point p = System.Windows.Forms.Cursor.Position;
+            if (window == null) return;
 
-            // 获取鼠标所在的屏幕
-            Screen currentScreen = Screen.FromPoint(p);
-            float dpiX = GetDpi(true);
-            float dpiY = GetDpi(false);
+            // Cursor.Position / Screen.WorkingArea 是设备像素；WPF Left/Top 是 DIP。
+            // 用窗口的 TransformFromDevice（否则退回系统 DPI）做同一套换算，避免截断和主副屏缩放不一致。
+            System.Drawing.Point cursor = System.Windows.Forms.Cursor.Position;
+            Screen currentScreen = Screen.FromPoint(cursor);
+            GetDipScale(window, out double scaleX, out double scaleY);
 
-            p.X = (int)(p.X / dpiX);
-            p.Y = (int)(p.Y / dpiY);
+            double mouseX = cursor.X * scaleX;
+            double mouseY = cursor.Y * scaleY;
 
-            //工作区宽度
-            double screenWidth = currentScreen.WorkingArea.Width / dpiX;
-            //工作区高度
-            double screenHeight = currentScreen.WorkingArea.Height / dpiY;
-            double screenX = currentScreen.WorkingArea.X / dpiX;
-            double screenY = currentScreen.WorkingArea.Y / dpiY;
+            System.Drawing.Rectangle workingArea = currentScreen.WorkingArea;
+            double screenLeft = workingArea.Left * scaleX;
+            double screenTop = workingArea.Top * scaleY;
+            double screenRight = workingArea.Right * scaleX;
+            double screenBottom = workingArea.Bottom * scaleY;
 
-            //判断是否超出最左边缘
-            if (p.X - window.Width / 2 < screenX)
+            double width = window.ActualWidth > 0 ? window.ActualWidth : window.Width;
+            double height = window.ActualHeight > 0 ? window.ActualHeight : window.Height;
+            if (double.IsNaN(width) || width <= 0) width = window.MinWidth;
+            if (double.IsNaN(height) || height <= 0) height = window.MinHeight;
+
+            double left = mouseX - width / 2 + Constants.SHADOW_WIDTH;
+            double top = mouseY - height / 2 + Constants.SHADOW_WIDTH;
+
+            if (left < screenLeft - Constants.SHADOW_WIDTH)
             {
-                //超出最左边缘
-                window.Left = screenX - Constants.SHADOW_WIDTH;
-            } else
+                left = screenLeft - Constants.SHADOW_WIDTH;
+            }
+            if (left + width > screenRight + Constants.SHADOW_WIDTH)
             {
-                window.Left = p.X - window.Width / 2 + Constants.SHADOW_WIDTH;
+                left = screenRight - width + Constants.SHADOW_WIDTH;
             }
 
-            //判断是否超出最右边缘
-            if (p.X + window.Width / 2 > screenWidth + screenX)
+            if (top < screenTop - Constants.SHADOW_WIDTH)
             {
-                //超出最右边缘
-                window.Left = screenWidth + screenX - window.Width + Constants.SHADOW_WIDTH;
+                top = screenTop - Constants.SHADOW_WIDTH;
             }
-            
-
-            //判断是否超出最上边缘
-            if (p.Y - window.Height / 2 < screenY)
+            if (top + height > screenBottom + Constants.SHADOW_WIDTH)
             {
-                //超出最上边缘
-                window.Top = screenY - Constants.SHADOW_WIDTH;
-            } else
-            {
-                window.Top = p.Y - window.Height / 2 + Constants.SHADOW_WIDTH;
+                top = screenBottom - height + Constants.SHADOW_WIDTH;
             }
 
-            //判断是否超出最下边缘
-            if (p.Y + window.Height / 2 > screenHeight + screenY)
-            {
-                //超出最下边缘
-                window.Top = screenHeight + screenY - window.Height + Constants.SHADOW_WIDTH;
-            }
+            window.Left = left;
+            window.Top = top;
             
 
 

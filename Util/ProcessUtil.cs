@@ -256,6 +256,7 @@ namespace GeekDesk.Util
             Process p = new Process();
             p.StartInfo.FileName = Constants.APP_DIR + "GeekDesk.exe";
             p.StartInfo.WorkingDirectory = Constants.APP_DIR;
+            CommonCode.FlushSaveAppData();
             p.Start();
 
             Application.Current.Shutdown();

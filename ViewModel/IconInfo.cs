@@ -277,13 +277,14 @@ namespace GeekDesk.ViewModel
         {
             get
             {
-
-                return ImageUtil.ByteArrToImage(ImageByteArr);
+                return GetCachedBitmap();
             }
             set
             {
-                bitmapImage = value;
-                ImageByteArr = ImageUtil.BitmapImageToByte(bitmapImage);
+                BitmapImage img = FreezeIfPossible(value);
+                imageByteArr = ImageUtil.BitmapImageToByte(img);
+                bitmapImage = img;
+                OnPropertyChanged("ImageByteArr");
                 OnPropertyChanged("BitmapImage");
             }
         }
@@ -292,14 +293,33 @@ namespace GeekDesk.ViewModel
         {
             get
             {
-                return ImageUtil.ByteArrToImage(ImageByteArr_NoWrite);
+                return GetCachedBitmap();
             }
             set
             {
-                bitmapImage = value;
-                ImageByteArr_NoWrite = ImageUtil.BitmapImageToByte(bitmapImage);
+                BitmapImage img = FreezeIfPossible(value);
+                imageByteArr = ImageUtil.BitmapImageToByte(img);
+                bitmapImage = img;
                 OnPropertyChanged("BitmapImage_NoWrite");
             }
+        }
+
+        private BitmapImage GetCachedBitmap()
+        {
+            if (bitmapImage == null && imageByteArr != null)
+            {
+                bitmapImage = FreezeIfPossible(ImageUtil.ByteArrToImage(imageByteArr));
+            }
+            return bitmapImage;
+        }
+
+        private static BitmapImage FreezeIfPossible(BitmapImage image)
+        {
+            if (image != null && image.CanFreeze && !image.IsFrozen)
+            {
+                image.Freeze();
+            }
+            return image;
         }
 
 
@@ -313,6 +333,7 @@ namespace GeekDesk.ViewModel
             set
             {
                 imageByteArr = value;
+                bitmapImage = null;
                 OnPropertyChanged("ImageByteArr");
             }
         }
@@ -327,6 +348,7 @@ namespace GeekDesk.ViewModel
             set
             {
                 imageByteArr = value;
+                bitmapImage = null;
             }
         }
 

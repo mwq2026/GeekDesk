@@ -11,6 +11,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.Serialization.Formatters.Binary;
+using System.Threading;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using static GeekDesk.Control.Other.GlobalMsgNotification;
@@ -51,6 +52,7 @@ namespace GeekDesk.Util
                         {
                             SavePassword(appData.AppConfig.MenuPassword);
                         }
+                        ClearTransientUiState(appData);
                         return appData;
                     }
                 }
@@ -89,6 +91,7 @@ namespace GeekDesk.Util
                                 HandyControl.Controls.Notification ntf = HandyControl.Controls.Notification.Show(gm, ShowAnimation.Fade, true);
                                 gm.ntf = ntf;
                                 File.Delete(bakFilePath);
+                                ClearTransientUiState(appData);
                                 SaveAppData(appData, Constants.DATA_FILE_PATH);
                                 return appData;
                             }
@@ -152,23 +155,91 @@ namespace GeekDesk.Util
         }
 
         private readonly static object _MyLock = new object();
+        private static Timer _saveTimer;
+        private static AppData _pendingAppData;
+        private static string _pendingFilePath;
+        private const int SaveDebounceMs = 400;
+
         /// <summary>
-        /// 保存app 数据
+        /// IsShow 只是窗口动画状态，不应随配置一起落盘。
+        /// </summary>
+        private static void ClearTransientUiState(AppData appData)
+        {
+            if (appData != null && appData.AppConfig != null)
+            {
+                appData.AppConfig.IsShow = null;
+            }
+        }
+
+        /// <summary>
+        /// 保存app 数据（短时间多次变更合并为一次写盘，避免显示/隐藏或缩放时卡住 UI）
         /// </summary>
         /// <param name="appData"></param>
         public static void SaveAppData(AppData appData, string filePath)
         {
+            if (appData == null || string.IsNullOrEmpty(filePath)) return;
             lock (_MyLock)
             {
-                //if (filePath.Equals(Constants.DATA_FILE_BAK_PATH))
-                //{
-                //    appData.AppConfig.SysBakTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                //}
-                if (!Directory.Exists(filePath.Substring(0, filePath.LastIndexOf("\\"))))
+                _pendingAppData = appData;
+                _pendingFilePath = filePath;
+                if (_saveTimer == null)
                 {
-                    Directory.CreateDirectory(filePath.Substring(0, filePath.LastIndexOf("\\")));
+                    _saveTimer = new Timer(SaveTimerCallback, null, SaveDebounceMs, Timeout.Infinite);
                 }
-                using (FileStream fs = new FileStream(filePath, FileMode.Create))
+                else
+                {
+                    _saveTimer.Change(SaveDebounceMs, Timeout.Infinite);
+                }
+            }
+        }
+
+        private static void SaveTimerCallback(object state)
+        {
+            FlushSaveAppData();
+        }
+
+        public static void FlushSaveAppData()
+        {
+            AppData data;
+            string path;
+            lock (_MyLock)
+            {
+                data = _pendingAppData;
+                path = _pendingFilePath;
+                _pendingAppData = null;
+                _pendingFilePath = null;
+                if (_saveTimer != null)
+                {
+                    _saveTimer.Change(Timeout.Infinite, Timeout.Infinite);
+                }
+            }
+            if (data == null || string.IsNullOrEmpty(path)) return;
+            SaveAppDataCore(data, path);
+        }
+
+        public static void ShutdownSave()
+        {
+            FlushSaveAppData();
+            lock (_MyLock)
+            {
+                if (_saveTimer != null)
+                {
+                    _saveTimer.Dispose();
+                    _saveTimer = null;
+                }
+            }
+        }
+
+        private static void SaveAppDataCore(AppData appData, string filePath)
+        {
+            lock (_MyLock)
+            {
+                int dirSep = filePath.LastIndexOf("\\");
+                if (!Directory.Exists(filePath.Substring(0, dirSep)))
+                {
+                    Directory.CreateDirectory(filePath.Substring(0, dirSep));
+                }
+                using (FileStream fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read))
                 {
                     BinaryFormatter bf = new BinaryFormatter();
                     bf.Serialize(fs, appData);
